@@ -1,3 +1,5 @@
 -- SQLAlchemy metadata initializes tables idempotently.
 -- Domain tables: surveys, station_readings, density_runs, visit_plans.
+-- Privacy tables: privacy_budget (singleton: total epsilon, sample cap, spent),
+-- privacy_releases (fingerprint-unique ledger: charged -> published).
 -- Unique natural keys: source.key; (record.source_id, record.reference).

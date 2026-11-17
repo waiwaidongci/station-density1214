@@ -13,7 +13,8 @@
 3. 分析配置：冻结来源、参数和全部样本，进入Redis队列。
 4. 完整结果：真实算法摘要、专属诊断、全部CSV导出和可恢复失败态。
 5. 复访计划：分析师草案→负责人批准→阅读者下载批准快照。
-6. 审计：登录、来源修改、任务worker完成、业务说明批准等事件。
+6. 隐私发布：带噪密度摘要的公开发布、共享隐私预算账册与公开入口。
+7. 审计：登录、来源修改、任务worker完成、业务说明批准、隐私扣费/发布等事件。
 
 ## 快速启动
 
@@ -70,6 +71,24 @@ Survey / StationReading / DensityRun / VisitPlan 是核心实体；另有User和
 
 已知边界：只在温度/湿度/颗粒三个标准化特征上做密度分区；不是地理显著性、风险诊断或自动污染识别。eps敏感，分区编号没有大小顺序；含常量列明确拒绝。
 
+## 隐私发布（差分隐私）
+
+复访协作需要公开密度摘要，但精确簇数和噪声数可能暴露单站是否入样。系统对公开发布施加纯 ε-差分隐私：
+
+- **相邻数据**：增删一个微站。发布量为计数类（观测数、分区数、噪声数），任一计数变化不超过 1，L1 敏感度 Δ=1；三项均分本次 ε，拉普拉斯尺度 b=3/ε；截断到 [0, 样本上限] 与四舍五入为后置处理，不额外消耗预算。该敏感度依据随每条发布返回（`sensitivity` 字段）。
+- **预先约定**：样本上限 `PRIVACY_SAMPLE_CAP`（默认 1000，超限拒绝发布 422）与总隐私预算 `PRIVACY_TOTAL_EPSILON`（默认 3.0），部署时约定，不随页面修改。
+- **共享预算账册**：所有研究共用总预算。按样本编号（reference）计算重叠：重叠样本（含跨来源）的发布 ε 顺序合并计费；互不重叠的发布按并行组合取 max 消耗。扣费在数据库行锁（`SELECT … FOR UPDATE`）内完成，并发发布不超支；预算不足时 409，零扣费且不返回任何计数。
+- **幂等与恢复**：发布指纹 = SHA256（机制版本 + 冻结样本 + 分析参数 + 本次 ε + 样本上限）。同一冻结输入与参数重试不重复扣费且沿用原噪声；改名或新建相同研究命中同一指纹，不重抽。扣费（charged）与发布（published）分两阶段，之间中断后同指纹重试可恢复，账册页提供“恢复发布”。
+- **隔离**：`GET /api/public/privacy/releases` 匿名可读，仅含带噪计数、ε、机制、敏感度依据、样本上限、指纹与公开时间，不含精确结果、样本编号、获批说明与操作人；内部 `/runs`、`/notes` 等研究入口保持原样。精确计数不落库到发布表，仅带噪值入库。
+- **页面**：导航“隐私发布”可扣费发布（分析师/负责人）、查看预算、隐私参数、发布账册与公开入口视图。
+
+| 接口 | 说明 |
+|---|---|
+| GET /privacy/budget | 总预算、已消耗、剩余、样本上限（登录） |
+| GET /privacy/releases | 发布账册（登录；不含样本编号与精确计数） |
+| POST /privacy/releases | 扣费并发布 `{run_id, epsilon}`（分析师/负责人；幂等） |
+| GET /public/privacy/releases | 公开入口（匿名；仅带噪计数与隐私参数） |
+
 ## 演示数据与一天剧本
 
 固定seed=42，3个来源 ` HL-202611-01/02/03`，每来源240条，共720条业务记录；三个账号和首轮种子任务。自然键检查后仅插入缺失数据，连跑seed不重复、不覆盖用户修改。`SEED_DEMO=true` 时启动自动执行；失败记录日志但不阻塞服务。首轮任务同样由独立worker真实计算。
@@ -99,10 +118,11 @@ backend/migrations/001_initial.sql
 | COMPOSE_PROJECT_NAME | `station-density`，隔离容器/网络/命名卷 |
 | FRONTEND_PORT / BACKEND_PORT / DB_PORT | `18246 / 19246 / 17746` |
 | SEED_DEMO | `true` |
+| PRIVACY_TOTAL_EPSILON / PRIVACY_SAMPLE_CAP | `3.0` / `1000`，预先约定的总隐私预算与样本上限 |
 | JWT_SECRET | `.env.example`演示值，部署前修改 |
 | DATABASE_URL / REDIS_URL | Compose内部连接，定义在compose的env锚点 |
 | ARTIFACT_DIR | `/artifacts`，后端worker共享 |
 
-共享枚举：`backend/src/constants/enums.py` 与 `frontend/src/constants/enums.js` 都定义 admin/analyst/viewer、queued/running/completed/failed、draft/approved。后端service检查对应字符串；README为全量值说明。共享前端组件table/status/chart/business跨总览、结果、配置与复核复用；actions hook和format utils负责交互/格式。后端errors与rate_limit是两个中间件。
+共享枚举：`backend/src/constants/enums.py` 与 `frontend/src/constants/enums.js` 都定义 admin/analyst/viewer、queued/running/completed/failed、draft/approved、charged/published。后端service检查对应字符串；README为全量值说明。共享前端组件table/status/chart/business跨总览、结果、配置与复核复用；actions hook和format utils负责交互/格式。后端errors与rate_limit是两个中间件。
 
 测试及截图在批根 `test-artifacts/gb-0042/`，不混入源码。独立算法oracle、HTTP完整流程和真实Playwright浏览器流程见该目录 `TESTING.md`。License：MIT。
